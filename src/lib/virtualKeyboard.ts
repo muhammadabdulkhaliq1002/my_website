@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { useHaptics } from '@/hooks/useHaptics';
 import { animator } from '@/lib/animations';
+import { useGesture } from '@/hooks/useGesture';
 
 interface VirtualKeyboardOptions {
   layout?: 'numeric' | 'calculator';
@@ -11,6 +12,7 @@ interface VirtualKeyboardOptions {
   debounceTime?: number;
   predictiveInput?: boolean;
   hapticFeedback?: boolean;
+  gestureEnabled?: boolean;
 }
 
 interface KeyBuffer {
@@ -30,7 +32,8 @@ export function useVirtualKeyboard({
   maxLength = 10,
   debounceTime = 150,
   predictiveInput = true,
-  hapticFeedback = true
+  hapticFeedback = true,
+  gestureEnabled = true
 }: VirtualKeyboardOptions = {}) {
   const [isOpen, setIsOpen] = useState(false);
   const [value, setValue] = useState(initialValue);
@@ -204,6 +207,52 @@ export function useVirtualKeyboard({
     handleKeyRelease();
     onClose?.();
   }, [onClose, handleKeyRelease]);
+
+  const { onGesture } = useGesture({
+    onSwipeDown: () => {
+      if (gestureEnabled) {
+        animator.animate('slideDown', () => close());
+      }
+    },
+    onSwipeUp: () => {
+      if (gestureEnabled && !isOpen) {
+        animator.animate('slideUp', () => open());
+      }
+    }
+  });
+
+  // Implement input buffering with requestAnimationFrame
+  const processInputBuffer = useCallback(() => {
+    if (inputBuffer.current.length === 0) return;
+    
+    const now = performance.now();
+    const validInputs = inputBuffer.current.filter(
+      input => now - input.timestamp < BUFFER_TIMEOUT
+    );
+    
+    if (validInputs.length > 0) {
+      const newValue = validInputs.reduce((acc, curr) => acc + curr.value, '');
+      setValue(prev => validateValue(prev + newValue));
+    }
+    
+    inputBuffer.current = [];
+    bufferTimeout.current = requestAnimationFrame(processInputBuffer);
+  }, [validateValue]);
+
+  // Enhanced performance optimizations
+  useEffect(() => {
+    if (isOpen) {
+      // Pre-warm animations
+      animator.preload(['slideUp', 'slideDown', 'keyPress']);
+      // Start input processing loop
+      bufferTimeout.current = requestAnimationFrame(processInputBuffer);
+    }
+    return () => {
+      if (bufferTimeout.current) {
+        cancelAnimationFrame(bufferTimeout.current);
+      }
+    };
+  }, [isOpen, processInputBuffer]);
 
   // Enhanced physical keyboard handling
   useEffect(() => {

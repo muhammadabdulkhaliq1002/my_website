@@ -1,4 +1,6 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
+import { logger } from './logger';
+import { connectionManager } from './connectionManager';
 
 interface PendingSync {
   id?: number;
@@ -31,16 +33,40 @@ const MAX_RETRIES = 5;
 const RETRY_DELAYS = [1000, 5000, 15000, 30000, 60000]; // Progressive delays
 const BATCH_SIZE = 10;
 
+interface SyncItem {
+  id: string;
+  operation: 'create' | 'update' | 'delete';
+  model: string;
+  data: any;
+  timestamp: number;
+  retryCount: number;
+}
+
 class SyncManager {
+  private static instance: SyncManager;
+  private syncQueue: SyncItem[] = [];
+  private isProcessing = false;
+  private maxRetries = 3;
+  private readonly SYNC_KEY = 'offline_sync_queue';
+
   private db: Promise<IDBPDatabase<SyncDB>>;
   private syncInProgress = false;
   private networkTimeout = 30000; // 30 seconds timeout
   private syncInterval: NodeJS.Timeout | null = null;
 
-  constructor() {
+  private constructor() {
     this.db = this.initializeDB();
+    this.loadQueueFromStorage();
     this.setupEventListeners();
+    this.setupNetworkListeners();
     this.startPeriodicSync();
+  }
+
+  static getInstance(): SyncManager {
+    if (!SyncManager.instance) {
+      SyncManager.instance = new SyncManager();
+    }
+    return SyncManager.instance;
   }
 
   private async initializeDB() {
@@ -60,12 +86,38 @@ class SyncManager {
     });
   }
 
+  private loadQueueFromStorage() {
+    try {
+      const stored = localStorage.getItem(this.SYNC_KEY);
+      if (stored) {
+        this.syncQueue = JSON.parse(stored);
+      }
+    } catch (error) {
+      logger.error('Failed to load sync queue', { error });
+    }
+  }
+
+  private saveQueueToStorage() {
+    try {
+      localStorage.setItem(this.SYNC_KEY, JSON.stringify(this.syncQueue));
+    } catch (error) {
+      logger.error('Failed to save sync queue', { error });
+    }
+  }
+
   private setupEventListeners() {
     if (typeof window !== 'undefined') {
       window.addEventListener('online', this.handleOnline);
       window.addEventListener('offline', this.handleOffline);
       window.addEventListener('beforeunload', this.handleBeforeUnload);
     }
+  }
+
+  private setupNetworkListeners() {
+    window.addEventListener('online', () => this.processSyncQueue());
+    window.addEventListener('offline', () => {
+      this.isProcessing = false;
+    });
   }
 
   private handleOnline = async () => {
@@ -305,6 +357,78 @@ class SyncManager {
     };
   }
 
+  async addToQueue(item: Omit<SyncItem, 'timestamp' | 'retryCount'>) {
+    const syncItem: SyncItem = {
+      ...item,
+      timestamp: Date.now(),
+      retryCount: 0
+    };
+    
+    this.syncQueue.push(syncItem);
+    this.saveQueueToStorage();
+    
+    if (navigator.onLine) {
+      await this.processSyncQueue();
+    }
+  }
+
+  private async processSyncQueue() {
+    if (this.isProcessing || this.syncQueue.length === 0) return;
+    
+    this.isProcessing = true;
+    
+    while (this.syncQueue.length > 0 && navigator.onLine) {
+      const item = this.syncQueue[0];
+      
+      try {
+        await connectionManager.executeQuery(async () => {
+          // Process sync item based on operation type
+          switch (item.operation) {
+            case 'create':
+              // Handle create operation
+              break;
+            case 'update':
+              // Handle update operation
+              break;
+            case 'delete':
+              // Handle delete operation
+              break;
+          }
+        });
+        
+        // Remove successfully processed item
+        this.syncQueue.shift();
+        this.saveQueueToStorage();
+        
+      } catch (error) {
+        item.retryCount++;
+        
+        if (item.retryCount >= this.maxRetries) {
+          // Move failed item to end of queue
+          this.syncQueue.shift();
+          this.syncQueue.push(item);
+        }
+        
+        logger.error('Sync operation failed', { error, item });
+        
+        if (!navigator.onLine) {
+          break;
+        }
+      }
+    }
+    
+    this.isProcessing = false;
+  }
+
+  getQueueLength(): number {
+    return this.syncQueue.length;
+  }
+
+  clearQueue() {
+    this.syncQueue = [];
+    this.saveQueueToStorage();
+  }
+
   dispose() {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
@@ -317,4 +441,4 @@ class SyncManager {
   }
 }
 
-export const syncManager = new SyncManager();
+export const syncManager = SyncManager.getInstance();

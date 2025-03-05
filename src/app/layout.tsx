@@ -8,12 +8,27 @@ import { inter, roboto } from '@/lib/fonts';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { ReactNode } from 'react';
+import { headers } from 'next/headers';
+import { initializeApp } from '@/lib/init';
+import { ErrorBoundaryWrapper } from '@/components/ui/ErrorBoundary';
+import { logger } from '@/lib/logger';
 
 export default async function RootLayout({
   children,
 }: {
   children: ReactNode;
 }) {
+  try {
+    await initializeApp();
+  } catch (error) {
+    logger.error('Failed to initialize application', { error });
+    // Continue loading the app, but in a degraded state
+  }
+
+  const headersList = headers();
+  const userAgent = headersList.get('user-agent');
+  const isMobile = userAgent?.includes('Mobile') || userAgent?.includes('Android');
+
   const session = await getServerSession(authOptions);
   
   return (
@@ -40,12 +55,14 @@ export default async function RootLayout({
       </head>
       <body className={`${inter.className} antialiased`}>
         <AuthProvider session={session}>
-          <div className="flex flex-col min-h-screen">
-            <Navbar />
-            <main className="flex-grow pt-16">{children}</main>
-            <Footer />
-          </div>
-          <ServiceWorkerRegistration />
+          <ErrorBoundaryWrapper>
+            <div className="flex flex-col min-h-screen">
+              <Navbar />
+              <main className="flex-grow pt-16">{children}</main>
+              <Footer />
+            </div>
+            <ServiceWorkerRegistration />
+          </ErrorBoundaryWrapper>
         </AuthProvider>
       </body>
     </html>

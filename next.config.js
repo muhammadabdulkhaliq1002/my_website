@@ -51,15 +51,17 @@ const nextConfig = {
 };
 
 if (process.env.NODE_ENV === 'production') {
-  // In production, wrap the Next.js config with PWA configuration.
-  const withPWA = require('next-pwa');
+  // In production, wrap the Next.js config with PWA configuration using the newer package
+  const withPWA = require('@ducanh2912/next-pwa').default;
   module.exports = withPWA({
     dest: 'public',
     register: true,
     skipWaiting: true,
-    disable: false,
+    disable: process.env.NODE_ENV === 'development',
+    cacheOnFrontEndNav: true,
+    aggressiveFrontEndNavCaching: true,
   })(nextConfig);
 } else {
-  // In development, export the config directly (with PWA support disabled).
+  // In development, export the config directly
   module.exports = nextConfig;
 }

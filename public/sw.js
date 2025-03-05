@@ -1,66 +1,162 @@
 // This is the service worker for the Integrated Accounting website
 
-const CACHE_NAME = 'integrated-accounting-v1';
-const ASSETS_TO_CACHE = [
+const CACHE_NAME = 'tax-app-cache-v1';
+const OFFLINE_URL = '/offline';
+const API_CACHE = 'tax-api-cache-v1';
+
+const STATIC_ASSETS = [
   '/',
-  '/services',
-  '/contact',
   '/offline',
   '/manifest.json',
-  '/icons/icon-72x72.png',
-  '/icons/icon-96x96.png',
-  '/icons/icon-128x128.png',
-  '/icons/icon-144x144.png',
-  '/icons/icon-152x152.png',
-  '/icons/icon-192x192.png',
-  '/icons/icon-384x384.png',
-  '/icons/icon-512x512.png'
+  '/Logo.PNG',
+  '/dashboard',
+  '/profile',
+  '/services'
 ];
 
-// Install event - cache basic assets
+const API_ROUTES = [
+  '/api/tax-returns',
+  '/api/consultations',
+  '/api/documents'
+];
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(ASSETS_TO_CACHE);
-    })
+    Promise.all([
+      caches.open(CACHE_NAME).then(cache => cache.addAll(STATIC_ASSETS)),
+      caches.open(API_CACHE).then(cache => {
+        // Pre-cache API responses if available
+        return Promise.all(
+          API_ROUTES.map(route => 
+            fetch(route)
+              .then(response => response.ok ? cache.put(route, response) : null)
+              .catch(() => null)
+          )
+        );
+      })
+    ])
   );
+  self.skipWaiting();
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      return Promise.all(
-        cacheNames.map((cacheName) => {
-          if (cacheName !== CACHE_NAME) {
-            return caches.delete(cacheName);
-          }
-        })
-      );
+    Promise.all([
+      caches.keys().then((cacheNames) => {
+        return Promise.all(
+          cacheNames
+            .filter((name) => name !== CACHE_NAME && name !== API_CACHE)
+            .map((name) => caches.delete(name))
+        );
+      }),
+      // Clean up old API cache entries
+      caches.open(API_CACHE).then(cache => {
+        return cache.keys().then(requests => {
+          return Promise.all(
+            requests.map(request => {
+              const url = new URL(request.url);
+              const timestamp = parseInt(url.searchParams.get('timestamp') || '0');
+              if (Date.now() - timestamp > 24 * 60 * 60 * 1000) { // 24 hours
+                return cache.delete(request);
+              }
+              return Promise.resolve();
+            })
+          );
+        });
+      })
+    ])
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  
+  // Handle API requests
+  if (API_ROUTES.some(route => url.pathname.startsWith(route))) {
+    event.respondWith(handleApiRequest(event.request));
+    return;
+  }
+
+  // Handle navigation requests
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request)
+        .catch(() => caches.match(OFFLINE_URL))
+    );
+    return;
+  }
+
+  // Handle static assets
+  event.respondWith(
+    caches.match(event.request)
+      .then((response) => response || fetch(event.request))
+      .catch(() => caches.match(OFFLINE_URL))
+  );
+});
+
+async function handleApiRequest(request) {
+  try {
+    // Try network first
+    const response = await fetch(request);
+    const cache = await caches.open(API_CACHE);
+    cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    // If offline, return cached response
+    const cachedResponse = await caches.match(request);
+    if (cachedResponse) {
+      return cachedResponse;
+    }
+    
+    // If no cache, return offline response
+    return new Response(
+      JSON.stringify({
+        error: 'You are offline',
+        offline: true,
+        timestamp: Date.now()
+      }),
+      {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+  }
+}
+
+// Handle background sync
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'tax-data-sync') {
+    event.waitUntil(syncData());
+  }
+});
+
+// Handle push notifications
+self.addEventListener('push', (event) => {
+  const data = event.data.json();
+  
+  event.waitUntil(
+    self.registration.showNotification('Tax Return Update', {
+      body: data.message,
+      icon: '/Logo.PNG',
+      badge: '/Logo.PNG',
+      data: data.url,
+      vibrate: [200, 100, 200]
     })
   );
 });
 
-// Fetch event - serve from cache, fall back to network
-self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request).then((response) => {
-      // Return cached version or fetch from network
-      return response || fetch(event.request).then((fetchResponse) => {
-        // Cache successful responses
-        if (fetchResponse && fetchResponse.status === 200) {
-          const responseToCache = fetchResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
-        }
-        return fetchResponse;
-      }).catch(() => {
-        // If both cache and network fail, show offline page
-        if (event.request.mode === 'navigate') {
-          return caches.match('/offline');
-        }
-      });
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  
+  event.waitUntil(
+    clients.matchAll({ type: 'window' }).then(windowClients => {
+      if (windowClients.length > 0) {
+        windowClients[0].focus();
+        windowClients[0].navigate(event.notification.data);
+      } else {
+        clients.openWindow(event.notification.data);
+      }
     })
   );
 });

@@ -1,24 +1,11 @@
 import { useCallback, useRef, useEffect, useMemo } from 'react';
 
-type HapticPattern = 'light' | 'medium' | 'heavy' | 'success' | 'error' | 'warning' | 'sequence';
-type HapticStrength = 'low' | 'normal' | 'high';
+type HapticPattern = 'light' | 'medium' | 'heavy' | 'success' | 'error' | 'warning';
 
-interface HapticConfig {
-  pattern: number[];
-  strength: number;
-  priority: number;
+interface HapticsOptions {
+  fallbackToVibrate?: boolean;
+  disableInBackground?: boolean;
 }
-
-// Optimized haptic patterns using Web Haptic API where available
-const patterns: Record<HapticPattern, HapticConfig> = {
-  light: { pattern: [5], strength: 0.3, priority: 1 },
-  medium: { pattern: [15], strength: 0.5, priority: 2 },
-  heavy: { pattern: [25], strength: 0.7, priority: 3 },
-  success: { pattern: [8, 20, 8], strength: 0.5, priority: 4 },
-  error: { pattern: [40, 20, 40], strength: 0.8, priority: 5 },
-  warning: { pattern: [25, 40], strength: 0.6, priority: 4 },
-  sequence: { pattern: [10, 15, 20, 25], strength: 0.5, priority: 3 }
-};
 
 const DEBOUNCE_TIME = 100; // ms
 const BATTERY_THRESHOLD = 0.2; // 20%
@@ -178,95 +165,68 @@ class HapticsManager {
   }
 }
 
-export function useHaptics(options: {
-  defaultStrength?: HapticStrength;
-  disabled?: boolean;
-} = {}) {
-  const { 
-    defaultStrength = 'normal',
-    disabled = false
-  } = options;
+export function useHaptics(options: HapticsOptions = {}) {
+  const { fallbackToVibrate = true, disableInBackground = true } = options;
 
-  const manager = useMemo(() => HapticsManager.getInstance(), []);
-  const lastTriggerTime = useRef<number>(0);
-  const batteryRef = useRef<{ level: number } | null>(null);
-  
-  // Initialize battery monitoring
-  useEffect(() => {
-    if (disabled || !('getBattery' in navigator)) return;
+  const isSupported = typeof window !== 'undefined' && 
+    (('vibrate' in navigator) || ('haptics' in navigator));
 
-    const updateBatteryStatus = (battery: any) => {
-      batteryRef.current = battery;
-    };
+  const patterns: Record<HapticPattern, number[]> = {
+    light: [10],
+    medium: [20],
+    heavy: [30],
+    success: [10, 30, 10],
+    error: [50, 100, 50],
+    warning: [30, 50, 30]
+  };
 
-    // @ts-ignore: Newer browsers support this
-    navigator.getBattery?.()
-      .then((battery: any) => {
-        updateBatteryStatus(battery);
-        battery.addEventListener('levelchange', () => updateBatteryStatus(battery));
-      })
-      .catch(() => {
-        batteryRef.current = null;
-      });
+  const trigger = async (pattern: HapticPattern = 'light') => {
+    if (!isSupported) return;
 
-    return () => {
-      // Clean up battery listener
-      navigator.getBattery?.()
-        .then((battery: any) => {
-          battery.removeEventListener('levelchange', updateBatteryStatus);
-        })
-        .catch(() => {});
-    };
-  }, [disabled]);
+    try {
+      // Check if app is in background
+      if (disableInBackground && document.hidden) return;
 
-  const shouldTriggerHaptics = useCallback(() => {
-    if (disabled) return false;
-
-    const now = Date.now();
-    if (now - lastTriggerTime.current < DEBOUNCE_TIME) {
-      return false;
-    }
-
-    // Reduce haptics on low battery
-    if (batteryRef.current?.level != null && batteryRef.current.level < BATTERY_THRESHOLD) {
-      return Math.random() > 0.7; // 30% chance to skip
-    }
-
-    return true;
-  }, [disabled]);
-
-  const trigger = useCallback((
-    pattern: HapticPattern,
-    strength: HapticStrength = defaultStrength
-  ) => {
-    if (!shouldTriggerHaptics()) return;
-
-    manager.triggerHaptic(pattern, strength).then(success => {
-      if (success) {
-        lastTriggerTime.current = Date.now();
+      // Try native haptics first
+      if ('haptics' in navigator) {
+        switch (pattern) {
+          case 'light':
+            await (navigator as any).haptics?.selectionStart();
+            break;
+          case 'medium':
+          case 'heavy':
+            await (navigator as any).haptics?.impactOccurred(pattern);
+            break;
+          case 'success':
+            await (navigator as any).haptics?.notificationOccurred('success');
+            break;
+          case 'error':
+            await (navigator as any).haptics?.notificationOccurred('error');
+            break;
+          case 'warning':
+            await (navigator as any).haptics?.notificationOccurred('warning');
+            break;
+        }
+      } else if (fallbackToVibrate && 'vibrate' in navigator) {
+        // Fallback to vibration API
+        navigator.vibrate(patterns[pattern]);
       }
-    });
-  }, [manager, shouldTriggerHaptics, defaultStrength]);
+    } catch (error) {
+      console.warn('Haptic feedback failed:', error);
+    }
+  };
 
-  const triggerSequence = useCallback((
-    patterns: HapticPattern[],
-    strength: HapticStrength = defaultStrength
-  ) => {
-    if (!shouldTriggerHaptics()) return;
-
-    patterns.forEach((pattern, index) => {
-      setTimeout(() => {
-        manager.triggerHaptic(pattern, strength);
-      }, index * 100);
-    });
-    
-    lastTriggerTime.current = Date.now();
-  }, [manager, shouldTriggerHaptics, defaultStrength]);
+  const selectionFeedback = () => trigger('light');
+  const impactFeedback = () => trigger('medium');
+  const notificationFeedback = () => trigger('success');
+  const errorFeedback = () => trigger('error');
 
   return {
+    isSupported,
     trigger,
-    triggerSequence,
-    isAvailable: manager.deviceCapabilities?.hasVibrator || manager.deviceCapabilities?.hasHapticsAPI,
-    isLowBattery: batteryRef.current?.level != null && batteryRef.current.level < BATTERY_THRESHOLD
+    selectionFeedback,
+    impactFeedback,
+    notificationFeedback,
+    errorFeedback
   };
 }

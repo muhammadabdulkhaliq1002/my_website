@@ -1,233 +1,185 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useRef, useEffect, useState } from 'react';
+import { useHaptics } from './useHaptics';
+import { animator } from '@/lib/animations';
 
 interface GestureOptions {
-  onSwipeLeft?: (velocity: number) => void;
-  onSwipeRight?: (velocity: number) => void;
-  onSwipeUp?: (velocity: number) => void;
-  onSwipeDown?: (velocity: number) => void;
-  onPan?: (deltaX: number, deltaY: number) => void;
+  onSwipeLeft?: () => void;
+  onSwipeRight?: () => void;
+  onSwipeUp?: () => void;
+  onSwipeDown?: () => void;
+  onPinch?: (scale: number) => void;
+  onRotate?: (angle: number) => void;
   threshold?: number;
   velocityThreshold?: number;
+  hapticFeedback?: boolean;
   preventScroll?: boolean;
   touchAction?: 'none' | 'pan-x' | 'pan-y' | 'auto';
 }
 
-interface TouchPoint {
-  x: number;
-  y: number;
-  time: number;
-}
-
 interface TouchState {
-  initialTouch: TouchPoint;
-  lastTouch: TouchPoint;
-  velocityX: number;
-  velocityY: number;
-  isTracking: boolean;
+  startX: number;
+  startY: number;
+  startTime: number;
+  touches: Touch[];
+  initialDistance?: number;
+  initialAngle?: number;
 }
-
-const VELOCITY_SAMPLE_INTERVAL = 16.67; // ~60fps
-const MOMENTUM_FACTOR = 0.95;
 
 export function useGesture(options: GestureOptions = {}) {
   const {
-    onSwipeLeft,
-    onSwipeRight,
-    onSwipeUp,
-    onSwipeDown,
-    onPan,
     threshold = 50,
-    velocityThreshold = 0.3,
+    velocityThreshold = 0.5,
+    hapticFeedback = true,
     preventScroll = false,
     touchAction = 'auto'
   } = options;
 
   const touchState = useRef<TouchState | null>(null);
-  const frameId = useRef<number>();
+  const { trigger } = useHaptics();
+  const isGestureInProgress = useRef(false);
   const [isSwiping, setIsSwiping] = useState(false);
 
-  // Cleanup animation frame
-  useEffect(() => {
-    return () => {
-      if (frameId.current) {
-        cancelAnimationFrame(frameId.current);
-      }
-    };
-  }, []);
+  const calculateVelocity = (distance: number, time: number) => {
+    return Math.abs(distance) / time;
+  };
 
-  const calculateVelocity = useCallback((current: TouchPoint, last: TouchPoint) => {
-    const deltaTime = current.time - last.time;
-    if (deltaTime === 0) return { x: 0, y: 0 };
+  const getDistance = (touch1: Touch, touch2: Touch) => {
+    const dx = touch1.clientX - touch2.clientX;
+    const dy = touch1.clientY - touch2.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
 
-    return {
-      x: (current.x - last.x) / deltaTime,
-      y: (current.y - last.y) / deltaTime
-    };
-  }, []);
+  const getAngle = (touch1: Touch, touch2: Touch) => {
+    return Math.atan2(
+      touch2.clientY - touch1.clientY,
+      touch2.clientX - touch1.clientX
+    );
+  };
 
-  const handlePan = useCallback((deltaX: number, deltaY: number, velocity: { x: number, y: number }) => {
-    if (onPan) {
-      onPan(deltaX, deltaY);
-    }
-
-    // Apply momentum if velocity is significant
-    if (Math.abs(velocity.x) > velocityThreshold || Math.abs(velocity.y) > velocityThreshold) {
-      let momentumX = velocity.x;
-      let momentumY = velocity.y;
-
-      const applyMomentum = () => {
-        if (Math.abs(momentumX) < 0.01 && Math.abs(momentumY) < 0.01) return;
-
-        onPan?.(momentumX, momentumY);
-        momentumX *= MOMENTUM_FACTOR;
-        momentumY *= MOMENTUM_FACTOR;
-        frameId.current = requestAnimationFrame(applyMomentum);
-      };
-
-      frameId.current = requestAnimationFrame(applyMomentum);
-    }
-  }, [onPan, velocityThreshold]);
-
-  useEffect(() => {
-    const handleTouchStart = (e: TouchEvent) => {
-      if (frameId.current) {
-        cancelAnimationFrame(frameId.current);
-      }
-
-      const touch = e.touches[0];
-      const touchPoint = {
-        x: touch.clientX,
-        y: touch.clientY,
-        time: Date.now()
-      };
-
+  const handleTouchStart = useCallback((e: TouchEvent) => {
+    if (e.touches.length > 0) {
       touchState.current = {
-        initialTouch: touchPoint,
-        lastTouch: touchPoint,
-        velocityX: 0,
-        velocityY: 0,
-        isTracking: true
+        startX: e.touches[0].clientX,
+        startY: e.touches[0].clientY,
+        startTime: performance.now(),
+        touches: Array.from(e.touches)
       };
+
+      if (e.touches.length === 2) {
+        const [touch1, touch2] = e.touches;
+        touchState.current.initialDistance = getDistance(touch1, touch2);
+        touchState.current.initialAngle = getAngle(touch1, touch2);
+      }
 
       setIsSwiping(true);
-    };
+    }
+  }, []);
 
-    const handleTouchMove = (e: TouchEvent) => {
-      if (!touchState.current?.isTracking) return;
+  const handleTouchMove = useCallback((e: TouchEvent) => {
+    if (!touchState.current || isGestureInProgress.current) return;
 
-      if (preventScroll) {
-        e.preventDefault();
-      }
+    if (preventScroll) {
+      e.preventDefault();
+    }
 
-      const touch = e.touches[0];
-      const currentTouch = {
-        x: touch.clientX,
-        y: touch.clientY,
-        time: Date.now()
-      };
+    const currentTouch = e.touches[0];
+    const { startX, startY, startTime } = touchState.current;
+    
+    const deltaX = currentTouch.clientX - startX;
+    const deltaY = currentTouch.clientY - startY;
+    const deltaTime = (performance.now() - startTime) / 1000; // Convert to seconds
 
-      // Update velocity on regular intervals
-      if (currentTouch.time - touchState.current.lastTouch.time >= VELOCITY_SAMPLE_INTERVAL) {
-        const velocity = calculateVelocity(currentTouch, touchState.current.lastTouch);
-        touchState.current.velocityX = velocity.x;
-        touchState.current.velocityY = velocity.y;
-        touchState.current.lastTouch = currentTouch;
+    // Handle multi-touch gestures
+    if (e.touches.length === 2 && touchState.current.initialDistance) {
+      const currentDistance = getDistance(e.touches[0], e.touches[1]);
+      const scale = currentDistance / touchState.current.initialDistance;
 
-        // Call pan handler with current deltas and velocity
-        const deltaX = currentTouch.x - touchState.current.initialTouch.x;
-        const deltaY = currentTouch.y - touchState.current.initialTouch.y;
-        handlePan(deltaX, deltaY, velocity);
-      }
-    };
-
-    const handleTouchEnd = (e: TouchEvent) => {
-      if (!touchState.current?.isTracking) return;
-
-      const touch = e.changedTouches[0];
-      const currentTouch = {
-        x: touch.clientX,
-        y: touch.clientY,
-        time: Date.now()
-      };
-
-      const deltaX = currentTouch.x - touchState.current.initialTouch.x;
-      const deltaY = currentTouch.y - touchState.current.initialTouch.y;
-      const velocity = calculateVelocity(currentTouch, touchState.current.lastTouch);
-      const speed = Math.sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-
-      // Only trigger for swipes with sufficient velocity
-      if (speed > velocityThreshold) {
-        // Check if horizontal swipe
-        if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > threshold) {
-          if (deltaX > 0 && onSwipeRight) {
-            onSwipeRight(velocity.x);
-          } else if (deltaX < 0 && onSwipeLeft) {
-            onSwipeLeft(-velocity.x);
-          }
-        }
-        // Check if vertical swipe
-        else if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > threshold) {
-          if (deltaY > 0 && onSwipeDown) {
-            onSwipeDown(velocity.y);
-          } else if (deltaY < 0 && onSwipeUp) {
-            onSwipeUp(-velocity.y);
-          }
+      if (options.onPinch) {
+        options.onPinch(scale);
+        if (hapticFeedback) {
+          trigger('light');
         }
       }
 
-      setIsSwiping(false);
-      touchState.current.isTracking = false;
-    };
-
-    const handleTouchCancel = () => {
-      if (touchState.current?.isTracking) {
-        setIsSwiping(false);
-        touchState.current.isTracking = false;
+      if (options.onRotate && touchState.current.initialAngle !== undefined) {
+        const currentAngle = getAngle(e.touches[0], e.touches[1]);
+        const rotation = (currentAngle - touchState.current.initialAngle) * (180 / Math.PI);
+        options.onRotate(rotation);
       }
-    };
+      return;
+    }
+
+    // Handle swipe gestures
+    const velocity = calculateVelocity(Math.max(Math.abs(deltaX), Math.abs(deltaY)), deltaTime);
+    
+    if (velocity >= velocityThreshold) {
+      isGestureInProgress.current = true;
+
+      if (Math.abs(deltaX) > Math.abs(deltaY)) {
+        // Horizontal swipe
+        if (Math.abs(deltaX) >= threshold) {
+          if (deltaX > 0 && options.onSwipeRight) {
+            animator.animate('swipeRight', () => {
+              options.onSwipeRight?.();
+              if (hapticFeedback) trigger('medium');
+            });
+          } else if (deltaX < 0 && options.onSwipeLeft) {
+            animator.animate('swipeLeft', () => {
+              options.onSwipeLeft?.();
+              if (hapticFeedback) trigger('medium');
+            });
+          }
+        }
+      } else {
+        // Vertical swipe
+        if (Math.abs(deltaY) >= threshold) {
+          if (deltaY > 0 && options.onSwipeDown) {
+            animator.animate('swipeDown', () => {
+              options.onSwipeDown?.();
+              if (hapticFeedback) trigger('medium');
+            });
+          } else if (deltaY < 0 && options.onSwipeUp) {
+            animator.animate('swipeUp', () => {
+              options.onSwipeUp?.();
+              if (hapticFeedback) trigger('medium');
+            });
+          }
+        }
+      }
+    }
+  }, [options, threshold, velocityThreshold, hapticFeedback, trigger, preventScroll]);
+
+  const handleTouchEnd = useCallback(() => {
+    touchState.current = null;
+    isGestureInProgress.current = false;
+    setIsSwiping(false);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
 
     // Apply touch-action CSS property to prevent browser default behaviors
     if (preventScroll) {
       document.body.style.touchAction = touchAction;
     }
 
-    // Use passive listeners where possible for better scrolling performance
-    document.addEventListener('touchstart', handleTouchStart, { passive: true });
-    document.addEventListener('touchmove', handleTouchMove, { 
-      passive: !preventScroll,
-      capture: true // Ensure our handler runs first
-    });
-    document.addEventListener('touchend', handleTouchEnd);
-    document.addEventListener('touchcancel', handleTouchCancel);
+    window.addEventListener('touchstart', handleTouchStart, { passive: true });
+    window.addEventListener('touchmove', handleTouchMove, { passive: !preventScroll });
+    window.addEventListener('touchend', handleTouchEnd);
 
     return () => {
-      document.removeEventListener('touchstart', handleTouchStart);
-      document.removeEventListener('touchmove', handleTouchMove, { capture: true });
-      document.removeEventListener('touchend', handleTouchEnd);
-      document.removeEventListener('touchcancel', handleTouchCancel);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
 
       if (preventScroll) {
         document.body.style.touchAction = 'auto';
       }
     };
-  }, [
-    onSwipeLeft, 
-    onSwipeRight, 
-    onSwipeUp, 
-    onSwipeDown, 
-    threshold,
-    velocityThreshold,
-    preventScroll,
-    touchAction,
-    calculateVelocity,
-    handlePan
-  ]);
+  }, [handleTouchStart, handleTouchMove, handleTouchEnd, preventScroll, touchAction]);
 
-  return { 
-    isSwiping,
-    velocity: touchState.current ? {
-      x: touchState.current.velocityX,
-      y: touchState.current.velocityY
-    } : { x: 0, y: 0 }
+  return {
+    isGestureSupported: typeof window !== 'undefined' && 'ontouchstart' in window,
+    isSwiping
   };
 }

@@ -4,6 +4,9 @@ import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import { prisma } from '@/lib/prisma';
 import { getServerSession } from 'next-auth';
+import { NextAuthOptions } from 'next-auth';
+import { PrismaAdapter } from '@auth/prisma-adapter';
+import GoogleProvider from 'next-auth/providers/google';
 
 declare module "next-auth" {
   interface Session extends DefaultSession {
@@ -25,88 +28,66 @@ declare module "next-auth" {
   }
 }
 
-export const authOptions: AuthOptions = {
+export const authOptions: NextAuthOptions = {
+  adapter: PrismaAdapter(prisma),
   providers: [
+    GoogleProvider({
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    }),
     CredentialsProvider({
-      name: 'Credentials',
+      name: 'credentials',
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" }
       },
       async authorize(credentials) {
         if (!credentials?.email || !credentials?.password) {
-          throw new Error('Please enter an email and password');
+          throw new Error('Invalid credentials')
         }
 
         const user = await prisma.user.findUnique({
-          where: {
-            email: credentials.email.toLowerCase(),
-          },
-          select: {
-            id: true,
-            email: true,
-            fullName: true,
-            password: true,
-            pan: true,
-            phone: true,
-            dateOfBirth: true,
-          }
-        });
+          where: { email: credentials.email }
+        })
 
-        if (!user) {
-          throw new Error('No user found with this email');
+        if (!user || !user.password) {
+          throw new Error('User not found')
         }
 
-        const isPasswordValid = await bcrypt.compare(credentials.password, user.password);
+        const isValid = await bcrypt.compare(credentials.password, user.password)
 
-        if (!isPasswordValid) {
-          throw new Error('Invalid password');
+        if (!isValid) {
+          throw new Error('Invalid password')
         }
 
-        return {
-          id: user.id,
-          email: user.email,
-          name: user.fullName,
-          pan: user.pan,
-          phone: user.phone || undefined,  // Changed from null to undefined to match the type
-          dateOfBirth: user.dateOfBirth,
-        };
+        return user
       }
     })
   ],
   session: {
-    strategy: "jwt",
+    strategy: 'jwt',
     maxAge: 30 * 24 * 60 * 60, // 30 days
   },
   pages: {
     signIn: '/login',
-    signOut: '/login', // Changed from '/' to '/login'
     error: '/login',
   },
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.id = user.id;
-        token.pan = user.pan;
-        token.phone = user.phone;
-        token.dateOfBirth = user.dateOfBirth;
+        token.id = user.id
+        token.email = user.email
       }
-      return token;
+      return token
     },
     async session({ session, token }) {
-      if (session?.user) {
-        session.user.id = token.id as string;
-        session.user.pan = token.pan as string;
-        session.user.phone = token.phone as string | undefined;
-        session.user.dateOfBirth = token.dateOfBirth as Date | undefined;
+      if (session.user) {
+        session.user.id = token.id as string
       }
-      return session;
-    },
-    async signOut() {
-      return { redirect: '/login' }
-    },
-  },
-};
+      return session
+    }
+  }
+}
 
 const handler = NextAuth(authOptions);
 export const auth = () => getServerSession(authOptions);
