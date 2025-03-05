@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  password      String
+  fullName      String
+  phone         String?
+  pan           String         @unique
+  dateOfBirth   DateTime
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  consultations Consultation[] @relation("UserConsultations")
+  documents     Document[]     @relation("UserDocuments")
+  taxReturns    TaxReturn[]    @relation("UserTaxReturns")
+
+  @@index([email])
+  @@index([pan])
+}
+
+model TaxReturn {
+  id             String         @id @default(cuid())
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  userId         String
+  assessmentYear String
+  status         String
+  filingDate     String?
+  data           Json
+  documents      Document[]     @relation("TaxReturnDocuments")
+  incomeDetails  IncomeDetails? @relation("TaxReturnIncomeDetails")
+  user           User           @relation("UserTaxReturns", fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Document {
+  id          String     @id @default(cuid())
+  userId      String
+  taxReturnId String?
+  type        String
+  fileName    String
+  fileUrl     String
+  uploadedAt  DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  taxReturn   TaxReturn? @relation("TaxReturnDocuments", fields: [taxReturnId], references: [id])
+  user        User       @relation("UserDocuments", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([taxReturnId])
+}
+
+model Consultation {
+  id          String    @id @default(cuid())
+  userId      String
+  subject     String
+  status      String
+  scheduledAt DateTime?
+  notes       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  user        User      @relation("UserConsultations", fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model IncomeDetails {
+  id                  String    @id @default(cuid())
+  taxReturnId         String    @unique
+  salaryIncome        Float     @default(0)
+  businessIncome      Float     @default(0)
+  housePropertyIncome Float     @default(0)
+  capitalGains        Float     @default(0)
+  otherIncome         Float     @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  taxReturn           TaxReturn @relation("TaxReturnIncomeDetails", fields: [taxReturnId], references: [id])
+
+  @@index([taxReturnId])
+}
